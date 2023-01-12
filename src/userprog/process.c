@@ -23,7 +23,7 @@
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(const char* file_name, void (**eip)(void), void** esp);
+static bool load(const char* prog_name, void (**eip)(void), void** esp, char* file_name);
 bool setup_thread(void (**eip)(void), void** esp);
 
 /* Initializes user programs in the system by ensuring the main
@@ -51,21 +51,30 @@ void userprog_init(void) {
    before process_execute() returns.  Returns the new process's
    process id, or TID_ERROR if the thread cannot be created. */
 pid_t process_execute(const char* file_name) {
-  char* fn_copy;
+  char* fn_copy, *save_ptr, *fn_name, *fn_copy2;
   tid_t tid;
 
   sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page(0);
+  fn_copy  = palloc_get_page(PAL_ZERO);
+  fn_copy2 = palloc_get_page(PAL_ZERO);
   if (fn_copy == NULL)
     return TID_ERROR;
-  strlcpy(fn_copy, file_name, PGSIZE);
+  strlcpy(fn_copy,  file_name, PGSIZE);
+  strlcpy(fn_copy2, file_name, PGSIZE);
+
+  /*Separate out function name*/
+  fn_name = strtok_r(fn_copy, " ", &save_ptr);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(fn_name, PRI_DEFAULT, start_process, fn_copy2);
+
+  /* fn_copy is only used for thread_create, so release it after use*/
+  palloc_free_page(fn_copy);
+
   if (tid == TID_ERROR)
-    palloc_free_page(fn_copy);
+    palloc_free_page(fn_copy2);
   return tid;
 }
 
@@ -76,10 +85,19 @@ static void start_process(void* file_name_) {
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
-
+  char* prog_name, *fn_copy, *save_ptr;
+ 
   /* Allocate process control block */
   struct process* new_pcb = malloc(sizeof(struct process));
   success = pcb_success = new_pcb != NULL;
+
+  /*Separate program name*/
+  fn_copy = (char*)malloc(sizeof(char) * (strlen(file_name) + 1));
+  if (fn_copy == NULL)
+    success = false;
+  strlcpy(fn_copy, file_name, PGSIZE);
+
+  prog_name = strtok_r(fn_copy, " ", &save_ptr);
 
   /* Initialize process control block */
   if (success) {
@@ -99,7 +117,7 @@ static void start_process(void* file_name_) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(file_name, &if_.eip, &if_.esp);
+    success = load(prog_name, &if_.eip, &if_.esp, file_name);
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -114,6 +132,8 @@ static void start_process(void* file_name_) {
 
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
+  free(fn_copy);
+
   if (!success) {
     sema_up(&temporary);
     thread_exit();
@@ -260,6 +280,7 @@ struct Elf32_Phdr {
 #define PF_R 4 /* Readable. */
 
 static bool setup_stack(void** esp);
+static void setup_call_stack(char* file_name, void **esp);
 static bool validate_segment(const struct Elf32_Phdr*, struct file*);
 static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable);
@@ -268,7 +289,7 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(const char* file_name, void (**eip)(void), void** esp) {
+bool load(const char* prog_name, void (**eip)(void), void** esp, char* file_name) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
@@ -283,9 +304,9 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   process_activate();
 
   /* Open executable file. */
-  file = filesys_open(file_name);
+  file = filesys_open(prog_name);
   if (file == NULL) {
-    printf("load: %s: open failed\n", file_name);
+    printf("load: %s: open failed\n", prog_name);
     goto done;
   }
 
@@ -293,7 +314,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
       memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) || ehdr.e_type != 2 || ehdr.e_machine != 3 ||
       ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Elf32_Phdr) || ehdr.e_phnum > 1024) {
-    printf("load: %s: error loading executable\n", file_name);
+    printf("load: %s: error loading executable\n", prog_name);
     goto done;
   }
 
@@ -350,6 +371,10 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   /* Set up stack. */
   if (!setup_stack(esp))
     goto done;
+
+  /* solve page fault exception by pushing the required arguments to the user function.
+   * initial fault happens at 0x08048996 mov 0xc(%ebp), %eax as presented in pregame.*/
+  setup_call_stack(file_name, esp);
 
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;
@@ -478,6 +503,55 @@ static bool setup_stack(void** esp) {
       palloc_free_page(kpage);
   }
   return success;
+}
+
+/*Follow Program startup details and setup the stack for user program,
+ * avoiding initial page fault from pregame project*/
+static void setup_call_stack(char* file_name, void **esp) 
+{
+  char* argv[30] = {NULL};
+  uint8_t i = 0U;
+  char * token, *save_ptr;
+
+  /* Push the userprog arguments into the calling stack first and gather their
+   * location in argv[] array for later use*/
+  for (token = strtok_r(file_name, " ", &save_ptr); token != NULL; 
+       token = strtok_r(NULL, " ", &save_ptr))
+  {
+    uint8_t size = strlen(token) * sizeof(char) + 1U; // NULL at the end
+    *esp = *esp - size;
+    strlcpy((char*)(*esp), token, size);
+    argv[i] = (char*)(*esp);
+    i++;
+  }
+
+  /* Calculate Stack alignment:
+   * later we still need to push i + 1 char pointers, 1 pointer to char pointer 
+   * and one int. So the total bytes needed is (i+1) * 4 + 4 + 4*/
+  uint8_t align_byte = ((uint32_t)(*esp) - 4 * (i + 3U)) % 0x10;
+  for(uint8_t j = 0; j < align_byte; j++)
+  {
+    *esp = *esp - 1;
+    *(char*)*esp = 0; // cast to char* b/c want to set one byte at a time
+  }
+
+  /* Push argv[]*/
+  for(int8_t j = i; j >= 0; j--)
+  {
+    *esp = *esp - 4;
+    *(char**)*esp = argv[j]; // cast to pointer to any pointer(always 4 byte)
+  }
+
+  /* Push argv*/
+  *esp = *esp - 4;
+  *(char***)*esp = (char**)(*esp + 4);
+
+  /*Push argc and return address*/
+  *esp = *esp - 4;
+  *(int*)*esp = i;
+  *esp = *esp - 4;
+  *(uint32_t*)*esp = 0;
+
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
