@@ -20,6 +20,8 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+struct list process_info_list;
+
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
@@ -44,6 +46,9 @@ void userprog_init(void) {
 
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
+
+  /* Initialize the process_info_list*/
+  list_init(&process_info_list);
 }
 
 /* Starts a new thread running a user program loaded from
@@ -75,6 +80,16 @@ pid_t process_execute(const char* file_name) {
 
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy2);
+
+  /* Thread created, add a node to the process_info_list*/
+  struct process_info* p = (struct process_info*)malloc(sizeof(struct process_info));
+  p->parentPid = thread_current()->tid;
+  p->pid = tid;
+  p->exit_status = -1;
+  p->waited = false;
+  sema_init(&(p->exit), 0);
+  list_push_front(&process_info_list, &(p->elem));
+
   return tid;
 }
 
@@ -135,9 +150,24 @@ static void start_process(void* file_name_) {
   free(fn_copy);
 
   if (!success) {
-    sema_up(&temporary);
+    //sema_up(&temporary);
+    struct list_elem *e;
+
+    for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
+         e = list_next(e))
+    {
+      struct process_info* p = list_entry(e, struct process_info, elem);
+      /* Signal parent that child exited(if parent is waiting)*/
+      p->exit_status = -1;
+      sema_up(&(p->exit));
+      break;
+    }
     thread_exit();
   }
+
+  /*Log the success status in pcb(for exec to use)*/
+  t->pcb->load_success = success;
+  /*Signal exec load_success is filled, clear its block*/
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -159,8 +189,32 @@ static void start_process(void* file_name_) {
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int process_wait(pid_t child_pid UNUSED) {
-  sema_down(&temporary);
-  return 0;
+  // sema_down(&temporary);
+  /* Find the corrent process_info node according to child_pid*/
+  struct list_elem *e;
+  struct thread* cur = thread_current(); 
+
+  for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
+       e = list_next(e))
+  {
+    struct process_info* p = list_entry(e, struct process_info, elem);
+    if (child_pid == p->pid)
+    {
+      /* Check if the calling process is the parent of the child or it
+       * has been waited*/
+      if ((p->parentPid != cur->tid) || (p->waited))
+      {
+        return -1;
+      }
+
+      /* Wait for the child process to finish*/
+      p->waited = true;
+      sema_down(&(p->exit));
+      return p->exit_status;
+      break;
+    }
+  }
+  return -1;
 }
 
 /* Free the current process's resources. */
@@ -198,7 +252,7 @@ void process_exit(void) {
   cur->pcb = NULL;
   free(pcb_to_free);
 
-  sema_up(&temporary);
+  //sema_up(&temporary);
   thread_exit();
 }
 

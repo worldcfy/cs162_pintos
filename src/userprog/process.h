@@ -27,6 +27,7 @@ struct process {
   uint32_t* pagedir;          /* Page directory. */
   char process_name[16];      /* Name of the main thread */
   struct thread* main_thread; /* Pointer to main thread */
+  bool load_success;          /* Flag indicate load status*/
 };
 
 void userprog_init(void);
@@ -43,5 +44,18 @@ tid_t pthread_execute(stub_fun, pthread_fun, void*);
 tid_t pthread_join(tid_t);
 void pthread_exit(void);
 void pthread_exit_main(void);
+
+/* The system needs to keep track of a minimal list of process info*/
+struct process_info
+{
+  tid_t pid;
+  tid_t parentPid;
+  int exit_status;
+  bool waited;
+  struct semaphore exit;
+  struct list_elem elem;
+};
+
+extern struct list process_info_list;
 
 #endif /* userprog/process.h */
