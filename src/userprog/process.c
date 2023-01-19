@@ -23,6 +23,7 @@
 struct list process_info_list;
 
 static struct semaphore temporary;
+struct semaphore filesys;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* prog_name, void (**eip)(void), void** esp, char* file_name);
@@ -47,7 +48,8 @@ void userprog_init(void) {
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
 
-  /* Initialize the process_info_list*/
+  sema_init(&filesys, 1);
+  /* Initialize the system level lists*/
   list_init(&process_info_list);
 }
 
@@ -58,6 +60,7 @@ void userprog_init(void) {
 pid_t process_execute(const char* file_name) {
   char* fn_copy, *save_ptr, *fn_name, *fn_copy2;
   tid_t tid;
+  enum intr_level old_level;
 
   sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
@@ -71,6 +74,11 @@ pid_t process_execute(const char* file_name) {
 
   /*Separate out function name*/
   fn_name = strtok_r(fn_copy, " ", &save_ptr);
+
+  /* Disable interrupt b/c after thread creation it could run before
+   * process_info is created. And process_info needs to be here since
+   * we need the parent info*/
+  old_level = intr_disable();
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create(fn_name, PRI_DEFAULT, start_process, fn_copy2);
@@ -87,8 +95,12 @@ pid_t process_execute(const char* file_name) {
   p->pid = tid;
   p->exit_status = -1;
   p->waited = false;
+  sema_init(&(p->load_semaphore), 0); 
   sema_init(&(p->exit), 0);
   list_push_front(&process_info_list, &(p->elem));
+
+  /* Now you can interrupt me*/
+  intr_set_level(old_level);
 
   return tid;
 }
@@ -101,6 +113,7 @@ static void start_process(void* file_name_) {
   struct intr_frame if_;
   bool success, pcb_success;
   char* prog_name, *fn_copy, *save_ptr;
+  struct list_elem *e;
  
   /* Allocate process control block */
   struct process* new_pcb = malloc(sizeof(struct process));
@@ -123,6 +136,8 @@ static void start_process(void* file_name_) {
 
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
+    t->pcb->file_descriptor_list = (struct list*)malloc(sizeof(struct list));
+    list_init(t->pcb->file_descriptor_list);
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
   }
 
@@ -133,6 +148,17 @@ static void start_process(void* file_name_) {
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(prog_name, &if_.eip, &if_.esp, file_name);
+  }
+
+  /*Log the success status in pcb(for exec to use)*/
+  for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
+       e = list_next(e))
+  {
+    struct process_info* p = list_entry(e, struct process_info, elem);
+    /* Signal parent that child exited(if parent is waiting)*/
+    p->load_success = success;
+    sema_up(&(p->load_semaphore));
+    break;
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -151,7 +177,6 @@ static void start_process(void* file_name_) {
 
   if (!success) {
     //sema_up(&temporary);
-    struct list_elem *e;
 
     for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
          e = list_next(e))
@@ -160,14 +185,11 @@ static void start_process(void* file_name_) {
       /* Signal parent that child exited(if parent is waiting)*/
       p->exit_status = -1;
       sema_up(&(p->exit));
+      sema_up(&(p->load_semaphore));
       break;
     }
     thread_exit();
   }
-
-  /*Log the success status in pcb(for exec to use)*/
-  t->pcb->load_success = success;
-  /*Signal exec load_success is filled, clear its block*/
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -221,6 +243,12 @@ int process_wait(pid_t child_pid UNUSED) {
 void process_exit(void) {
   struct thread* cur = thread_current();
   uint32_t* pd;
+
+  /*  Close the opened file and release deny write*/
+  file_close(cur->pcb->file);
+
+  /* Signal exit semaphore in case parent waiting*/
+  
 
   /* If this thread does not have a PCB, don't worry */
   if (cur->pcb == NULL) {
@@ -358,7 +386,13 @@ bool load(const char* prog_name, void (**eip)(void), void** esp, char* file_name
   process_activate();
 
   /* Open executable file. */
+  sema_down(&filesys);
   file = filesys_open(prog_name);
+  sema_up(&filesys);
+  t->pcb->file = file;
+  if (file)
+    file_deny_write(file);
+
   if (file == NULL) {
     printf("load: %s: open failed\n", prog_name);
     goto done;
@@ -437,7 +471,6 @@ bool load(const char* prog_name, void (**eip)(void), void** esp, char* file_name
 
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
   return success;
 }
 

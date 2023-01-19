@@ -17,6 +17,15 @@ typedef tid_t pid_t;
 typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
+/* File descriptor table for each process. Keep track of a list
+ * of OPEN files for each process.*/
+typedef int fd_t; // File descriptor
+struct file_descriptor {
+  fd_t fd;
+  struct file* file;
+  struct list_elem elem;
+};
+
 /* The process control block for a given process. Since
    there can be multiple threads per process, we need a separate
    PCB from the TCB. All TCBs in a process will have a pointer
@@ -26,8 +35,9 @@ struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */
   char process_name[16];      /* Name of the main thread */
+  struct file* file;          /* file pointer for executable load*/
   struct thread* main_thread; /* Pointer to main thread */
-  bool load_success;          /* Flag indicate load status*/
+  struct list* file_descriptor_list; /* File descriptor for each process*/
 };
 
 void userprog_init(void);
@@ -52,10 +62,13 @@ struct process_info
   tid_t parentPid;
   int exit_status;
   bool waited;
+  bool load_success;          /* Can't put in pcb for not existing files*/
   struct semaphore exit;
+  struct semaphore load_semaphore; /*Sync for exec syscall*/
   struct list_elem elem;
 };
 
 extern struct list process_info_list;
 
+extern struct semaphore filesys;
 #endif /* userprog/process.h */

@@ -100,7 +100,6 @@ struct thread {
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
-  struct semaphore load_semaphore; /*Sync for exec syscall*/
 };
 
 /* Types of scheduler that the user can request the kernel

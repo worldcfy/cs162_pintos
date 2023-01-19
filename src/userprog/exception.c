@@ -78,7 +78,23 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
+
+      /* Store the exit status -1 and signal parents to unblock*/
+      struct thread* cur = thread_current();
+      struct list_elem* e;
+      for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
+           e = list_next(e))
+      {
+        struct process_info* p = list_entry(e, struct process_info, elem);
+        if (p->pid == cur->tid)
+        {
+          p->exit_status = -1;
+          sema_up(&(p->exit));
+          printf("%s: exit(%d)\n", cur->pcb->process_name, -1);
+        }
+      }
       process_exit();
+
       NOT_REACHED();
 
     case SEL_KCSEG:
