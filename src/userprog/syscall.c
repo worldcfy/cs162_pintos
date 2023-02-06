@@ -1,5 +1,6 @@
 #include "userprog/syscall.h"
 #include <stdio.h>
+#include "lib/float.h"
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
@@ -396,6 +397,16 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     }
 
     break;
+
+  case SYS_COMPUTE_E:
+    /* syscall1f(NUMBER, ARG0)*/
+    if (!is_user_address_valid((void*)args+8))
+      up_sema_and_exit();
+
+    f->eax = sys_sum_to_e(args[1]);
+
+    break;
+
 
   default:
     /*Not supported yet, sorry. Can't offer you anything*/

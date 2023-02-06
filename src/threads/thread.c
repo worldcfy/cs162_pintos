@@ -44,6 +44,7 @@ struct kernel_thread_frame {
   void* aux;             /* Auxiliary data for function. */
 };
 
+
 /* Statistics. */
 static long long idle_ticks;   /* # of timer ticks spent idle. */
 static long long kernel_ticks; /* # of timer ticks in kernel threads. */
@@ -78,6 +79,8 @@ static struct thread* thread_schedule_reserved(void);
     "-sched=fair". "-sched=mlfqs"
    Is equal to SCHED_FIFO by default. */
 enum sched_policy active_sched_policy;
+
+uint8_t fpu[108];
 
 /* Selects a thread to run from the ready list according to
    some scheduling policy, and returns a pointer to it. */
@@ -115,6 +118,10 @@ void thread_init(void) {
   init_thread(initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid();
+
+  uint8_t fpu_save[108];
+  asm volatile("finit; fsave (%0)": :"g"(&fpu_save));
+  memcpy(fpu, fpu_save, 108);
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -205,6 +212,8 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   sf = alloc_frame(t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
+
+  memcpy(&(sf->fpu), fpu, 108);
 
   /* Add to run queue. */
   thread_unblock(t);

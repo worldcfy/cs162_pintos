@@ -149,4 +149,6 @@ void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
 
+/* Store the FPU stack values for initialization*/
+extern uint8_t fpu[108];
 #endif /* threads/thread.h */

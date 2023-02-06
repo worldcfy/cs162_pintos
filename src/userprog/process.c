@@ -147,6 +147,9 @@ static void start_process(void* file_name_) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
+    //uint8_t fpu_save[108];
+    //asm volatile("finit; fsave (%0)": :"g"(&fpu_save));
+    memcpy(&if_.fpu, fpu, 108);
     success = load(prog_name, &if_.eip, &if_.esp, file_name);
   }
 
