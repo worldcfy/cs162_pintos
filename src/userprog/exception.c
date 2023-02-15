@@ -91,6 +91,7 @@ static void kill(struct intr_frame* f) {
           p->exit_status = -1;
           sema_up(&(p->exit));
           printf("%s: exit(%d)\n", cur->pcb->process_name, -1);
+          break;
         }
       }
       process_exit();

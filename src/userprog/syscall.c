@@ -57,6 +57,7 @@ void up_sema_and_exit(void)
       /*Up the exit sema*/
       p->exit_status = -1;
       sema_up(&(p->exit));
+      break;
     }
   }
   /* Return exit status via eax*/
@@ -111,6 +112,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
         sema_up(&(p->exit));
         break;
       }
+
+      if(list_next(e) == list_end(&process_info_list))
+        NOT_REACHED();
     }
 
     /* Return exit status via eax*/
@@ -143,12 +147,15 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     /*Invoke the program and save return pid value*/
     f->eax = process_execute((char*)args[1]);
     
+    if ((int32_t)f->eax == TID_ERROR)
+      break;
+
     /* Find the correct load sema and see if child has been loaded*/
     for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
          e = list_next(e))
     {
       struct process_info* p = list_entry(e, struct process_info, elem);
-      if (p->pid == (uint8_t)f->eax)
+      if (p->pid == (int32_t)f->eax)
       {
         sema_down(&(p->load_semaphore));
         /*If the program can't load or run for any reason, return -1*/
@@ -156,6 +163,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
           f->eax = -1;
         break;
       }
+
+      if(list_next(e) == list_end(&process_info_list))
+        NOT_REACHED();
     }
 
     break;
@@ -170,7 +180,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
          e = list_next(e))
     {
       struct process_info* p = list_entry(e, struct process_info, elem);
-      if (p->parentPid == thread_current()->tid)
+      if (p->pid == (int)args[1])
       {
         /* Done with the node and free resources. If waited a second time 
          * will still return -1 simply b/c can't find the node*/
@@ -178,6 +188,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
         free(p);
         break;
       }
+
     }
 
     f->eax = rtn;
@@ -213,12 +224,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
         || !is_user_address_valid((void*)(args[1]+4)))
       up_sema_and_exit();
     
-    static fd_t i = 2; // File Descriptor starts from 2 since 0 and 1 are occupied
-
     /* Open the file from the filesys*/
     sema_down(&filesys);
     struct file* fp = filesys_open((char*)args[1]);
-    sema_up(&filesys);
 
     /* Create a file descriptor node and add it to the list */
     struct file_descriptor* fd = (struct file_descriptor*)malloc(sizeof(struct file_descriptor));
@@ -226,15 +234,16 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     if (fp)
     {
       fd->file = fp;
-      fd->fd = i;
-      f->eax = i;
-      i++;
+      fd->fd = t->pcb->fd_track;
+      f->eax = t->pcb->fd_track;
+      t->pcb->fd_track++;
       list_push_front(t->pcb->file_descriptor_list, &(fd->elem));
     }
     else
     {
       f->eax = -1;
     }
+    sema_up(&filesys);
     
     break;
 
@@ -255,6 +264,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
         free(p);
         break;
       }
+
+      if(list_next(e) == list_end(t->pcb->file_descriptor_list))
+        NOT_REACHED();
     }
 
     break;
@@ -295,7 +307,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     if (args[1] == STDIN_FILENO)
     {
       char* ptr = (char*)args[2];
-      for (uint8_t i = 0; i < args[3]; i++)
+      for (uint32_t i = 0; i < args[3]; i++)
       {
         *ptr = input_getc();
         ptr++;

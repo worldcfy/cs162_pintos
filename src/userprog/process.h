@@ -37,6 +37,7 @@ struct process {
   char process_name[16];      /* Name of the main thread */
   struct file* file;          /* file pointer for executable load*/
   struct thread* main_thread; /* Pointer to main thread */
+  uint32_t fd_track;
   struct list* file_descriptor_list; /* File descriptor for each process*/
 };
 

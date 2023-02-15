@@ -67,8 +67,18 @@ pid_t process_execute(const char* file_name) {
      Otherwise there's a race between the caller and load(). */
   fn_copy  = palloc_get_page(PAL_ZERO);
   fn_copy2 = palloc_get_page(PAL_ZERO);
-  if (fn_copy == NULL)
+
+  if ((fn_copy == NULL)||(fn_copy2 == NULL))
+  {
+    if (fn_copy)
+      palloc_free_page(fn_copy);
+
+    if (fn_copy2)
+      palloc_free_page(fn_copy2);
+
     return TID_ERROR;
+  }
+
   strlcpy(fn_copy,  file_name, PGSIZE);
   strlcpy(fn_copy2, file_name, PGSIZE);
 
@@ -88,17 +98,18 @@ pid_t process_execute(const char* file_name) {
 
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy2);
-
-  /* Thread created, add a node to the process_info_list*/
-  struct process_info* p = (struct process_info*)malloc(sizeof(struct process_info));
-  p->parentPid = thread_current()->tid;
-  p->pid = tid;
-  p->exit_status = -1;
-  p->waited = false;
-  sema_init(&(p->load_semaphore), 0); 
-  sema_init(&(p->exit), 0);
-  list_push_front(&process_info_list, &(p->elem));
-
+  else
+  {
+    /* Thread created, add a node to the process_info_list*/
+    struct process_info* p = (struct process_info*)malloc(sizeof(struct process_info));
+    p->parentPid = thread_current()->tid;
+    p->pid = tid;
+    p->exit_status = -1;
+    p->waited = false;
+    sema_init(&(p->load_semaphore), 0); 
+    sema_init(&(p->exit), 0);
+    list_push_front(&process_info_list, &(p->elem));
+  }
   /* Now you can interrupt me*/
   intr_set_level(old_level);
 
@@ -136,6 +147,7 @@ static void start_process(void* file_name_) {
 
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
+    t->pcb->fd_track = 2;
     t->pcb->file_descriptor_list = (struct list*)malloc(sizeof(struct list));
     list_init(t->pcb->file_descriptor_list);
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
@@ -159,9 +171,12 @@ static void start_process(void* file_name_) {
   {
     struct process_info* p = list_entry(e, struct process_info, elem);
     /* Signal parent that child exited(if parent is waiting)*/
-    p->load_success = success;
-    sema_up(&(p->load_semaphore));
-    break;
+    if (t->tid == p->pid)
+    {
+      p->load_success = success;
+      sema_up(&(p->load_semaphore));
+      break;
+    }
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -170,6 +185,7 @@ static void start_process(void* file_name_) {
     // If this happens, then an unfortuantely timed timer interrupt
     // can try to activate the pagedir, but it is now freed memory
     struct process* pcb_to_free = t->pcb;
+    free(t->pcb->file_descriptor_list);
     t->pcb = NULL;
     free(pcb_to_free);
   }
@@ -186,10 +202,17 @@ static void start_process(void* file_name_) {
     {
       struct process_info* p = list_entry(e, struct process_info, elem);
       /* Signal parent that child exited(if parent is waiting)*/
-      p->exit_status = -1;
-      sema_up(&(p->exit));
-      sema_up(&(p->load_semaphore));
-      break;
+
+      if (t->tid == p->pid)
+      {
+        /* Delete the node so that any wait will default to return -1 */
+        (void)list_remove(&(p->elem));
+        free(p);
+        //p->exit_status = -1;
+        //sema_up(&(p->exit));
+        //sema_up(&(p->load_semaphore));
+        break;
+      }
     }
     thread_exit();
   }
@@ -246,6 +269,7 @@ int process_wait(pid_t child_pid UNUSED) {
 void process_exit(void) {
   struct thread* cur = thread_current();
   uint32_t* pd;
+  struct list_elem* e;
 
   /*  Close the opened file and release deny write*/
   file_close(cur->pcb->file);
@@ -258,6 +282,18 @@ void process_exit(void) {
     thread_exit();
     NOT_REACHED();
   }
+
+  /* Release any unclosed file descriptor, or will not pass multi-oom*/
+  e = list_begin(cur->pcb->file_descriptor_list); 
+  while(e != list_end(cur->pcb->file_descriptor_list))
+  {
+    struct file_descriptor* p = list_entry(e, struct file_descriptor, elem);
+    e = list_next(e);
+    file_close(p->file);
+    (void)list_remove(&(p->elem));
+    free(p);
+  }
+  free(cur->pcb->file_descriptor_list);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -282,6 +318,17 @@ void process_exit(void) {
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
   free(pcb_to_free);
+
+  //for (e = list_begin(&process_info_list); e != list_end(&process_info_list);
+  //     e = list_next(e))
+  //{
+  //  struct process_info* p = list_entry(e, struct process_info, elem);
+  //  if (p->pid == cur->tid)
+  //  {
+  //    sema_up(&(p->exit));
+  //    break;
+  //  }
+  //}
 
   //sema_up(&temporary);
   thread_exit();
